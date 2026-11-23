@@ -122,6 +122,12 @@ function AITurn:onBlocked()
     self:startRecoveryTurn(1 * self.turningRadius)
 end
 
+--- A vehicle that won't move for us (AutoDrive, parked) is blocking the turn.
+---@param isBack boolean it is behind us, don't back up into it
+function AITurn:onBlockedByVehicle(isBack)
+    self:startRecoveryTurn(isBack and 0 or self.turningRadius, 0, true)
+end
+
 function AITurn:onWaypointChange(ix)
     self:debug('onWaypointChange %d', ix)
     if self.driveStrategy and self.driveStrategy.isWorking and self.driveStrategy:isWorking() then
@@ -701,17 +707,19 @@ function CourseTurn:generateCalculatedTurn()
     self.turnCourse = turnManeuver:getCourse()
 end
 
-function CourseTurn:generatePathfinderTurn(useHeadland)
+---@param clearance number|nil extra distance to keep around the vehicle, see PathfinderContext
+function CourseTurn:generatePathfinderTurn(useHeadland, clearance)
     self.pathfindingStartedAt = g_currentMission.time
     local result
     local turnEndNode, goalOffset = self.turnContext:getTurnEndNodeAndOffsets(self.steeringLength)
     local _, backMarkerDistance = self.driveStrategy:getFrontAndBackMarkers()
-    self:debug('Pathfinder turn (useHeadland: %s): generate turn with hybrid A*, goal offset %.1f', useHeadland, goalOffset)
+    self:debug('Pathfinder turn (useHeadland: %s): generate turn with hybrid A*, goal offset %.1f, clearance %.1f',
+            useHeadland, goalOffset, clearance or 0)
     self.driveStrategy.pathfinder, result = PathfinderUtil.findPathForTurn(self.vehicle, 0, turnEndNode, goalOffset,
             self.turningRadius, self.driveStrategy:getAllowReversePathfinding(),
             useHeadland and self.fieldWorkCourse or nil,
             self.driveStrategy:getWorkWidth(), backMarkerDistance,
-            self.driveStrategy:isTurnOnFieldActive(), self.turnContext:getBoundaryId())
+            self.driveStrategy:isTurnOnFieldActive(), self.turnContext:getBoundaryId(), clearance)
     if result.done then
         return self:onPathfindingDone(result.path)
     else
@@ -780,25 +788,40 @@ end
 --- of the turn context, just as a pathfinder turn would do.
 ---@class RecoveryTurn : CourseTurn
 RecoveryTurn = CpObject(CourseTurn)
+-- an AutoDrive vehicle usually drives on once we backed off, a parked one never does
+RecoveryTurn.waitForBlockingVehicleMs = 15000
 ---@param reverseDistance number|nil distance to back up before retrying pathfinding, default 10 m
 ---@param retryCount number|nil this attempt's retry count, that is how many times so far have this turn tried to
 --- recover? First call should be 0 (default)
+---@param blockedByVehicle boolean|nil blocked by a vehicle that won't move for us: always back up first, and
+--- instead of giving up, wait for it to clear and try again
 function RecoveryTurn:init(vehicle, driveStrategy, ppc, proximityController, turnContext, fieldWorkCourse, workWidth,
-                           reverseDistance, retryCount, name)
+                           reverseDistance, retryCount, blockedByVehicle, name)
     CourseTurn.init(self, vehicle, driveStrategy, ppc, proximityController, turnContext, fieldWorkCourse, workWidth, name or 'RecoveryTurn')
+    self:addState('WAITING_FOR_BLOCKER')
     -- we could also just unregister, but this way we'll have a log entry in case the recovery is
     -- blocked too, indicating that we give up.
     self.proximityController:registerBlockingObjectListener(self, RecoveryTurn.onBlocked)
     self.retryCount = retryCount or 0
-    if self.driveStrategy:getAllowReversePathfinding() then
+    self.blockedByVehicle = blockedByVehicle
+    self.waitOver = CpTemporaryObject(true)
+    -- a retry from the same position would find the same path, whose first leg the proximity sensor
+    -- stopped, so back up first on a retry even when the pathfinder may reverse
+    self.reversedFirst = not self.driveStrategy:getAllowReversePathfinding() or self.retryCount > 0 or
+            blockedByVehicle
+    if not self.reversedFirst then
         self:debug('Starting a pathfinder turn to recover after being blocked without reversing first')
-        self:generatePathfinderTurn(false)
+        self:generatePathfinderTurn(false, self:getClearance())
     else
         reverseDistance = reverseDistance or 10
-        self:debug('reverse pathfinding not allowed, reversing before pathfinding, retry count %d, reverse distance %.1f',
+        self:debug('reversing before pathfinding, retry count %d, reverse distance %.1f',
                 self.retryCount, reverseDistance)
         self.state = self.states.REVERSING_AFTER_BLOCKED
-        self.turnCourse = Course.createStraightReverseCourse(self.vehicle, reverseDistance)
+        -- start where the node the PPC follows in reverse is, so it really backs up reverseDistance. Starting at
+        -- the root node (3 m ahead of it on a combine) used up most of a short reverse course before moving.
+        local dzReverser = AIUtil.getDirectionNodeToReverserNodeOffset(self.vehicle)
+        self.turnCourse = Course.createFromNode(self.vehicle, AIUtil.getDirectionNode(self.vehicle), 0,
+                dzReverser, dzReverser - reverseDistance, -5, true)
         self.ppc:setCourse(self.turnCourse)
         self.ppc:initialize(1)
     end
@@ -807,9 +830,26 @@ end
 function RecoveryTurn:turn()
     if self.state == self.states.REVERSING_AFTER_BLOCKED then
         return AITurn.turn(self)
+    elseif self.state == self.states.WAITING_FOR_BLOCKER then
+        if self.waitOver:get() then
+            self:debug('Trying again after waiting for the blocking vehicle')
+            self:generatePathfinderTurn(false, self:getClearance())
+        end
+        return nil, nil, nil, 0
     else
         return CourseTurn.turn(self)
     end
+end
+
+--- Without a path around a vehicle, the calculated fallback turn would drive right back into it.
+function RecoveryTurn:onPathfindingDone(path)
+    if self.blockedByVehicle and not (path and #path > 2) then
+        self:debug('No path around the blocking vehicle, waiting %d s', self.waitForBlockingVehicleMs / 1000)
+        self.state = self.states.WAITING_FOR_BLOCKER
+        self.waitOver:set(false, self.waitForBlockingVehicleMs)
+        return
+    end
+    CourseTurn.onPathfindingDone(self, path)
 end
 
 function RecoveryTurn:onWaypointPassed(ix, course)
@@ -817,16 +857,39 @@ function RecoveryTurn:onWaypointPassed(ix, course)
     if self.turnCourse and self.turnCourse:isLastWaypointIx(ix) then
         if self.state == self.states.REVERSING_AFTER_BLOCKED then
             self:debug('Starting a pathfinder turn to recover after being blocked')
-            self:generatePathfinderTurn(false)
+            self:generatePathfinderTurn(false, self:getClearance())
         end
     end
 end
 
+--- Plan the recovery path out of the proximity sensor's stop range, or it stops us again on its first leg.
+function RecoveryTurn:getClearance()
+    return ProximityController.stopThresholdNormal + 0.25
+end
+
+---@param isBack boolean it is behind us
+function RecoveryTurn:onBlockedByVehicle(isBack)
+    if self.state == self.states.WAITING_FOR_BLOCKER then
+        return
+    elseif self.state == self.states.REVERSING_AFTER_BLOCKED then
+        self:debug('Blocked by a vehicle while backing up, try the turn from here')
+        self:generatePathfinderTurn(false, self:getClearance())
+    else
+        self:debug('Blocked by a vehicle again, backing up to let it pass')
+        self:startRecoveryTurn(isBack and 0 or self.turningRadius, self.retryCount + 1, true)
+    end
+end
+
 function RecoveryTurn:onBlocked()
+    if self.blockedByVehicle and self.state == self.states.REVERSING_AFTER_BLOCKED then
+        self:debug('Blocked while backing up away from a vehicle, try the turn from here')
+        self:generatePathfinderTurn(false, self:getClearance())
+        return
+    end
     if self.retryCount < 1 then
         self:debug('Recovering from blocked turn unsuccessful after %d tries, trying again.', self.retryCount + 1)
-        -- back up a bit more and see if that works
-        self:startRecoveryTurn(0.5 * self.turningRadius, self.retryCount + 1)
+        -- back up (a bit more, if we already did) and see if that works
+        self:startRecoveryTurn((self.reversedFirst and 0.5 or 1) * self.turningRadius, self.retryCount + 1)
     else
         self:debug('Recovering from blocked turn unsuccessful, giving up after %d tries.', self.retryCount + 1)
         self:resumeFieldworkAfterTurn(self.turnContext.turnEndWpIx)

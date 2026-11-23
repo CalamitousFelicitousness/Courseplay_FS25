@@ -436,12 +436,13 @@ end
 --- start of the next row.
 ---@param reverseDistance number|nil distance to back up before retrying pathfinding (default 10 m)
 ---@param retryCount number|nil how many times have we tried to recover so far? (to limit the number of retries)
+---@param blockedByVehicle boolean|nil blocked by a vehicle that won't move for us, not by an object
 ---@return boolean true if a recovery turn could be created
-function AIDriveStrategyFieldWorkCourse:startRecoveryTurn(reverseDistance, retryCount)
+function AIDriveStrategyFieldWorkCourse:startRecoveryTurn(reverseDistance, retryCount, blockedByVehicle)
     self:debug('Blocked in a turn, attempt to recover')
     if self.turnContext then
         self.aiTurn = RecoveryTurn(self.vehicle, self, self.ppc, self.proximityController, self.turnContext,
-                self.course, self.workWidth, reverseDistance, retryCount)
+                self.course, self.workWidth, reverseDistance, retryCount, blockedByVehicle)
         self.state = self.states.TURNING
         return true
     else

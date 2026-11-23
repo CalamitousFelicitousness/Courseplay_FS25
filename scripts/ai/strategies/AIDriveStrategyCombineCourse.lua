@@ -2206,15 +2206,38 @@ end
 
 --- This is called by the proximity controller if we have been blocked by another vehicle for a while
 function AIDriveStrategyCombineCourse:onBlockingVehicle(vehicle, isBack)
+    local strategy = vehicle.getIsCpActive and vehicle:getIsCpActive() and
+            vehicle.getCpDriveStrategy and vehicle:getCpDriveStrategy()
     if isBack then
         self:debug('Proximity sensor: blocking vehicle %s behind us', CpUtil.getName(vehicle))
         self:checkBlockingUnloader()
+        if not (strategy and strategy.requestToBackupForReversingCombine) then
+            self:onBlockedInTurnByVehicle(vehicle, true)
+        end
     else
         self:debug('Proximity sensor: blocking vehicle %s in front of us', CpUtil.getName(vehicle))
-        local strategy = vehicle.getCpDriveStrategy and vehicle:getCpDriveStrategy()
         if strategy and strategy.requestToMoveOutOfWay then
             strategy:requestToMoveOutOfWay(self.vehicle, isBack)
+        else
+            self:onBlockedInTurnByVehicle(vehicle, false)
         end
+    end
+end
+
+--- A vehicle not driven by a CP unloader (AutoDrive, parked, player) won't move for us.
+---@param isBack boolean the vehicle is behind us
+function AIDriveStrategyCombineCourse:onBlockedInTurnByVehicle(vehicle, isBack)
+    if not self:isTurning() or not self.aiTurn then
+        return
+    end
+    if isBack and self.aiTurn:isEndingTurn() then
+        -- only backing up to place the header at the row start, start the row from here instead
+        self:debug('%s does not yield, starting the row from here', CpUtil.getName(vehicle))
+        self.aiTurn:resumeFieldworkAfterTurn(self.aiTurn.turnContext.turnEndWpIx)
+    else
+        -- back up and find another way through the turn, or wait until it clears
+        self:debug('%s does not yield, recovering the turn', CpUtil.getName(vehicle))
+        self.aiTurn:onBlockedByVehicle(isBack)
     end
 end
 
