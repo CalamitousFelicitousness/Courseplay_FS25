@@ -40,7 +40,10 @@ PathfinderUtil.VehicleData = CpObject()
 --- non-rectangular shapes, like a combine with a wide header
 --- If the vehicle has a towed implement, it is handled separately from other implements to allow for the
 --- pathfinding to consider the towed implement's heading (which will be different from the vehicle's heading)
-function PathfinderUtil.VehicleData:init(vehicle, withImplements, buffer)
+---@param buffer number|nil added to the front and rear of the rectangles sized from the vehicle size
+---@param clearance number|nil added to all sides of both boxes, including rectangles from AI markers
+function PathfinderUtil.VehicleData:init(vehicle, withImplements, buffer, clearance)
+    clearance = clearance or 0
     self.vehicle = vehicle
     self.vehicleSizeScanner = VehicleSizeScanner()
     self.rootVehicle = vehicle:getRootVehicle()
@@ -54,11 +57,11 @@ function PathfinderUtil.VehicleData:init(vehicle, withImplements, buffer)
         -- the trailer's heading is different than the vehicle's heading and will be calculated and
         -- checked for collision independently at each waypoint. Also, the trailer is rotated to its heading
         -- around the hitch (which we approximate as the front side of the size rectangle), not around the root node
-        local dFront = buffer or 0
-        local dRear = -self.vehicleSizeScanner:getLength() - (buffer or 0)
+        local dFront = (buffer or 0) + clearance
+        local dRear = -self.vehicleSizeScanner:getLength() - (buffer or 0) - clearance
         -- don't use just the width as the vehicle may be asymmetrical
-        dLeft = dLeft + (buffer or 0)
-        dRight = dRight - (buffer or 0)
+        dLeft = dLeft + (buffer or 0) + clearance
+        dRight = dRight - (buffer or 0) - clearance
         local inputAttacherJoint = self.towedImplement:getActiveInputAttacherJoint()
         local towedImplementSideOffset = 0
         if inputAttacherJoint then
@@ -89,7 +92,8 @@ function PathfinderUtil.VehicleData:init(vehicle, withImplements, buffer)
     end
     table.insert(implements, { object = vehicle })
     local dFront, dRear, dLeft, dRight = self:calculateSizeOfObjectList(vehicle, implements, buffer)
-    self.vehicleOverlapBoxParams = self:calculateOverlapBoxParams(dFront, dRear, dLeft, dRight)
+    self.vehicleOverlapBoxParams = self:calculateOverlapBoxParams(dFront + clearance, dRear - clearance,
+            dLeft + clearance, dRight - clearance)
 end
 
 ---@return table the vehicle    
@@ -448,10 +452,12 @@ end
 ---@param turnOnField boolean is turn on field allowed?
 ---@param boundaryId string|nil id of the boundary (field or island), to make sure we stay on the same headland as
 --- the headland number alone may also be one of the island headlands.
+---@param clearance number|nil extra distance to keep around the vehicle, see PathfinderContext
 ---@return PathfinderInterface pathfinder
 ---@return PathfinderResult
 function PathfinderUtil.findPathForTurn(vehicle, startOffset, goalReferenceNode, goalOffset, turnRadius, allowReverse,
-                                        courseWithHeadland, workingWidth, backMarkerDistance, turnOnField, boundaryId)
+                                        courseWithHeadland, workingWidth, backMarkerDistance, turnOnField, boundaryId,
+                                        clearance)
     local x, z, yRot = PathfinderUtil.getNodePositionAndDirection(vehicle:getAIDirectionNode(), 0, startOffset or 0)
     local start = State3D(x, -z, CpMathUtil.angleFromGame(yRot))
     x, z, yRot = PathfinderUtil.getNodePositionAndDirection(goalReferenceNode, 0, goalOffset or 0)
@@ -484,6 +490,7 @@ function PathfinderUtil.findPathForTurn(vehicle, startOffset, goalReferenceNode,
 
     local context = PathfinderContext(vehicle):useFieldNum(CpFieldUtil.getFieldNumUnderVehicle(vehicle))
     context:offFieldPenalty(turnOnField and 10 or context._offFieldPenalty)
+    context:clearance(clearance or 0)
     local constraints = PathfinderConstraints(context)
     return pathfinder, pathfinder:start(start, goal, turnRadius, allowReverse, constraints, constraints.trailerHitchLength)
 end

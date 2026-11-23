@@ -58,6 +58,10 @@ function PathfinderConstraints:init(context)
     self.vehicle = context._vehicle
     self.turnRadius = AIUtil.getTurningRadius(context._vehicle) or 10
     self.vehicleData = PathfinderUtil.VehicleData(context._vehicle, true, 0.25)
+    if context._clearance > 0 then
+        self.vehicleDataWithClearance = PathfinderUtil.VehicleData(context._vehicle, true, 0.25, context._clearance)
+        self.clearanceRange = context._clearanceRange
+    end
     self.trailerHitchLength = AIUtil.getTowBarLength(context._vehicle) or 3
     self.collisionDetector = PathfinderCollisionDetector(context._vehicle, context._vehiclesToIgnore, context._objectsToIgnore, context._collisionMask)
     self.maxFruitPercent = context._maxFruitPercent
@@ -204,20 +208,22 @@ function PathfinderConstraints:isValidNode(node, ignoreTrailer, offFieldValid)
     PathfinderUtil.setWorldPositionAndRotationOnTerrain(PathfinderUtil.helperNode,
             node.x, -node.y, CpMathUtil.angleToGame(node.t), 0.5)
 
+    local vehicleData = self.vehicleDataWithClearance and node.d < self.clearanceRange and
+            self.vehicleDataWithClearance or self.vehicleData
     -- for debug purposes only, store validity info on node
     node.collidingShapes = self.collisionDetector:findCollidingShapes(PathfinderUtil.helperNode,
-            self.vehicleData:getVehicle(), self.vehicleData:getVehicleOverlapBoxParams())
+            vehicleData:getVehicle(), vehicleData:getVehicleOverlapBoxParams())
     ignoreTrailer = ignoreTrailer or node.d < self.ignoreTrailerAtStartRange
-    if self.vehicleData:getTowedImplement() and not ignoreTrailer then
+    if vehicleData:getTowedImplement() and not ignoreTrailer then
         -- now check the trailer or towed implement
         -- move the node to the rear of the vehicle (where approximately the trailer is attached)
-        local x, y, z = localToWorld(PathfinderUtil.helperNode, 0, 0, self.vehicleData:getHitchOffset())
+        local x, y, z = localToWorld(PathfinderUtil.helperNode, 0, 0, vehicleData:getHitchOffset())
 
         PathfinderUtil.setWorldPositionAndRotationOnTerrain(PathfinderUtil.helperNode, x, z,
                 CpMathUtil.angleToGame(node.tTrailer), 0.5)
 
         node.collidingShapes = node.collidingShapes + self.collisionDetector:findCollidingShapes(PathfinderUtil.helperNode,
-                self.vehicleData:getTowedImplement(), self.vehicleData:getTowedImplementOverlapBoxParams())
+                vehicleData:getTowedImplement(), vehicleData:getTowedImplementOverlapBoxParams())
         if node.collidingShapes > 0 then
             self.trailerCollisionNodeCount = self.trailerCollisionNodeCount + 1
         end

@@ -242,11 +242,13 @@ end
 --- Retry the last pathfinder call with context. Will use the exact same call with the same target parameters,
 --- but the context passed in here, so constraints like off-field penalty or max fruit percent can be relaxed on retry.
 ---@param context PathfinderContext
+---@param numRetries number|nil retries for this run, default is the last run's (0 after a success, reset() clears it)
 ---@return boolean true if retry successfully started
-function PathfinderController:retry(context)
+function PathfinderController:retry(context, numRetries)
     if self.currentPathfinderCall then
-        self:debug("Retrying pathfinding with context: %s, retries: %d.", tostring(context), self.numRetries)
-        self:start(context, self.numRetries, self.currentPathfinderCall)
+        numRetries = numRetries or self.numRetries
+        self:debug("Retrying pathfinding with context: %s, retries: %d.", tostring(context), numRetries)
+        self:start(context, numRetries, self.currentPathfinderCall)
         return true
     else
         self:error('Pathfinder has not been called before, can\'t retry')

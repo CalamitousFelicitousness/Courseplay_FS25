@@ -57,6 +57,10 @@ local context = PathfinderContext():maxFruitPercent(100):useFieldNum(10):vehicle
 ---@field _maxIterations number
 ---@field _obstacleAtStartRange number
 ---@field _ignoreTrailerAtStartRange number
+---@field clearance function
+---@field _clearance number
+---@field clearanceRange function
+---@field _clearanceRange number
 PathfinderContext = CpObject()
 PathfinderContext.defaultOffFieldPenalty = 7.5
 PathfinderContext.preferredPathAffinity = 5
@@ -104,6 +108,12 @@ PathfinderContext.attributesToDefaultValue = {
     -- Maximum number of iterations before the hybrid A* pathfinding gives up. The default works well
     -- for normal sized fields, on bigger maps with huge fields you may want to double or triple this
     ["maxIterations"] = HybridAStar.defaultMaxIterations,
+    -- Extra distance in meters to keep on all sides of the vehicle and its implements, for instance to stay out
+    -- of the proximity sensor's stop range when planning around an obstacle that already stopped us
+    ["clearance"] = 0,
+    -- Apply the clearance only this far (path length) from the start, so a goal close to another vehicle
+    -- (an unloader next to the pipe) stays reachable
+    ["clearanceRange"] = math.huge,
     -- Collision mask to use, to disable collisions completely, set to 0objectsToIgnore
     ["collisionMask"] = CpUtil.getDefaultCollisionFlags() + CollisionFlag.TERRAIN_DELTA
 }
