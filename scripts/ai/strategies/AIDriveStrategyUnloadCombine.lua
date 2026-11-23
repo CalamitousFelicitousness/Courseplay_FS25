@@ -81,6 +81,10 @@ AIDriveStrategyUnloadCombine = CpObject(AIDriveStrategyCourse)
 AIDriveStrategyUnloadCombine.minDistanceWhenMovingOutOfWay = 5
 -- when moving out of way of another vehicle, move at most so many meters
 AIDriveStrategyUnloadCombine.maxDistanceWhenMovingOutOfWay = 25
+-- backing up and repeating the pathfinding after an object (fence, tree) blocked us, at most this many times per trip
+AIDriveStrategyUnloadCombine.maxBlockedByObjectRecoveries = 2
+-- a successful pathfinding uses up the retries, the repeated one gets a fresh set to relax its constraints
+AIDriveStrategyUnloadCombine.pathfindingRetriesAfterBlockedByObject = 3
 AIDriveStrategyUnloadCombine.safeManeuveringDistance = 30 -- distance to keep from a combine not ready to unload
 AIDriveStrategyUnloadCombine.pathfindingRange = 5 -- won't do pathfinding if target is closer than this
 -- The normal limit to apply a penalty for the pathfinder. This is relatively low to keep the unloader further
@@ -135,7 +139,7 @@ AIDriveStrategyUnloadCombine.UNLOAD_TYPES = {
 AIDriveStrategyUnloadCombine.myStates = {
     IDLE = { fuelSaveAllowed = true }, --- Only allow fuel save, if the unloader is waiting for a combine.
     WAITING_FOR_PATHFINDER = {},
-    MOVING_BACK_BEFORE_PATHFINDING = { pathfinderController = nil, pathfinderContext = nil }, -- there is an obstacle ahead, move back a bit so the pathfinder can succeed
+    MOVING_BACK_BEFORE_PATHFINDING = { pathfinderController = nil, pathfinderContext = nil, numRetries = nil }, -- there is an obstacle ahead, move back a bit so the pathfinder can succeed
     --- States to maneuver away from combines and so on.
     --- No need to be assigned to a combine!
     MOVING_BACK = { vehicle = nil, holdCombine = false, denyBackupRequest = true },
@@ -215,6 +219,7 @@ function AIDriveStrategyUnloadCombine:init(task, job)
     self.driveUnloadNowRequested = CpTemporaryObject(false)
     self.movingAwayDelay = CpTemporaryObject(false)
     self.checkForTrailerToUnloadTo = CpTemporaryObject(true)
+    self.blockedByObjectRecoveries = 0
     self.unloadTargetType = self.UNLOAD_TYPES.COMBINE
     --- Register all active unloaders here to access them fast.
     AIDriveStrategyUnloadCombine.activeUnloaders[self] = self.vehicle
@@ -293,6 +298,7 @@ function AIDriveStrategyUnloadCombine:setAIVehicle(vehicle, jobParameters)
     self.proximityController = ProximityController(self.vehicle, self:getProximitySensorWidth())
     self.proximityController:registerIsSlowdownEnabledCallback(self, AIDriveStrategyUnloadCombine.isProximitySpeedControlEnabled)
     self.proximityController:registerBlockingVehicleListener(self, AIDriveStrategyUnloadCombine.onBlockingVehicle)
+    self.proximityController:registerBlockingObjectListener(self, AIDriveStrategyUnloadCombine.onBlockingObject)
     self.proximityController:registerIgnoreObjectCallback(self, AIDriveStrategyUnloadCombine.ignoreProximityObject)
     -- this is for following a chopper. The reason we are not using the proximityController's forward looking
     -- sensor is that it may be too high, and does not see the header of the chopper. Alternatively, we could
@@ -560,6 +566,7 @@ function AIDriveStrategyUnloadCombine:areThereAnyCombinesOrLoaderLeftoverOnTheFi
 end
 
 function AIDriveStrategyUnloadCombine:startWaitingForSomethingToDo()
+    self.blockedByObjectRecoveries = 0
     if self.state ~= self.states.IDLE then
         self:releaseCombine()
         self.course = Course.createStraightForwardCourse(self.vehicle, 25)
@@ -986,6 +993,9 @@ end
 ------------------------------------------------------------------------------------------------------------------------
 function AIDriveStrategyUnloadCombine:onLastWaypointPassed()
     self:debug('Last waypoint passed')
+    if self:isDrivingPathfinderCourse() then
+        self.blockedByObjectRecoveries = 0
+    end
     if self.state == self.states.DRIVING_TO_COMBINE then
         if self:isOkToStartUnloadingCombine() then
             -- Right behind the combine, aligned, go for the pipe
@@ -999,14 +1009,7 @@ function AIDriveStrategyUnloadCombine:onLastWaypointPassed()
         self:setNewState(self.stateAfterMovedOutOfWay)
         self:startRememberedCourse()
     elseif self.state == self.states.MOVING_BACK_BEFORE_PATHFINDING then
-        if self.state.properties.pathfinderController then
-            self:debug('Retry last pathfinding after moved back a bit')
-            self:setNewState(self.states.WAITING_FOR_PATHFINDER)
-            self.lastState.properties.pathfinderController:retry(self.lastState.properties.pathfinderContext)
-        else
-            self:debug('No pathfinder controller after moving back')
-            self:startWaitingForSomethingToDo()
-        end
+        self:onMovedBackBeforePathfinding()
     elseif self.state == self.states.MOVING_AWAY_FROM_OTHER_VEHICLE then
         self:startWaitingForSomethingToDo()
     elseif self.state == self.states.MOVING_BACK_FOR_HEADLAND_TURN then
@@ -1555,13 +1558,28 @@ function AIDriveStrategyUnloadCombine:onPathfindingFailed(giveUpFunc, controller
     end
 end
 
-function AIDriveStrategyUnloadCombine:startMovingBackBeforePathfinding(pathfinderController, pathfinderContext)
+---@param numRetries number|nil retries for the repeated pathfinding, default is what the controller has left
+function AIDriveStrategyUnloadCombine:startMovingBackBeforePathfinding(pathfinderController, pathfinderContext, numRetries)
     self:debug('There is an obstacle ahead, moving back before starting the pathfinding')
     self:setNewState(self.states.MOVING_BACK_BEFORE_PATHFINDING)
     self.state.properties.pathfinderContext = pathfinderContext
     self.state.properties.pathfinderController = pathfinderController
+    self.state.properties.numRetries = numRetries
     local reverseCourse = Course.createStraightReverseCourse(self.vehicle, 1.5 * self.turningRadius)
     self:startCourse(reverseCourse, 1)
+end
+
+--- End of the reverse course, or something behind us stopped it early.
+function AIDriveStrategyUnloadCombine:onMovedBackBeforePathfinding()
+    if self.state.properties.pathfinderController then
+        self:debug('Retry last pathfinding after moved back a bit')
+        self:setNewState(self.states.WAITING_FOR_PATHFINDER)
+        self.lastState.properties.pathfinderController:retry(self.lastState.properties.pathfinderContext,
+                self.lastState.properties.numRetries)
+    else
+        self:debug('No pathfinder controller after moving back')
+        self:startWaitingForSomethingToDo()
+    end
 end
 
 --- Is this position in the area I'm assigned to work?
@@ -2225,6 +2243,58 @@ function AIDriveStrategyUnloadCombine:onBlockingVehicle(blockingVehicle, isBack)
         end
         self:startCourse(course, 1)
     end
+end
+
+--- Driving a course the pathfinder controller generated, so its last call can be repeated.
+function AIDriveStrategyUnloadCombine:isDrivingPathfinderCourse()
+    return self.state == self.states.DRIVING_TO_COMBINE or
+            self.state == self.states.DRIVING_TO_MOVING_COMBINE or
+            self.state == self.states.DRIVING_TO_SELF_UNLOAD or
+            self.state == self.states.DRIVING_BACK_TO_START_POSITION_WHEN_FULL or
+            self.state == self.states.DRIVE_TO_FIELD_UNLOAD_POSITION or
+            self.state == self.states.DRIVE_TO_FIELD_UNLOAD_PARK_POSITION
+end
+
+--- Something that is not a vehicle (fence, tree, pole) has been blocking us for a while.
+--- The proximity stop also triggers on objects beside the course, so back up and find a new path.
+---@param isBack boolean true if it was detected behind us
+function AIDriveStrategyUnloadCombine:onBlockingObject(isBack)
+    if not self.vehicle:getIsCpActive() then
+        return
+    end
+    if isBack then
+        if self.state == self.states.MOVING_BACK_BEFORE_PATHFINDING then
+            self:debug('Blocked while moving back before pathfinding, try the pathfinding from here')
+            self:onMovedBackBeforePathfinding()
+        end
+        return
+    end
+    if not self:isDrivingPathfinderCourse() then
+        self:debug('An object has been blocking us for a while, no recovery in state %s', self.state.name)
+        return
+    end
+    if self.state == self.states.DRIVING_TO_MOVING_COMBINE then
+        -- the rendezvous is stale by the time we backed up, so release the combine and let it call again
+        self:debug('An object has been blocking us on the way to a moving combine, back up and wait for a new call')
+        self:startMovingBackBeforePathfinding(nil, nil)
+        return
+    end
+    if self.blockedByObjectRecoveries >= self.maxBlockedByObjectRecoveries then
+        self:debug('An object is still blocking us after %d recoveries, giving up', self.blockedByObjectRecoveries)
+        self.vehicle:stopCurrentAIJob(AIMessageCpErrorNoPathFound.new())
+        return
+    end
+    self.blockedByObjectRecoveries = self.blockedByObjectRecoveries + 1
+    self:debug('An object has been blocking us for a while, recovery %d of %d',
+            self.blockedByObjectRecoveries, self.maxBlockedByObjectRecoveries)
+    -- keep the new path out of the proximity sensor's stop range, or it stops us at the same object again.
+    -- Only near the start, where that object is, the goal next to the combine's pipe is closer than that.
+    local context = self.pathfinderController:getCurrentContext()
+    context:clearance(ProximityController.stopThresholdNormal + 0.25)
+    -- we back up 1.5 turning radius, so it is about that far, plus what the sensor sees past it
+    context:clearanceRange(1.5 * self.turningRadius + ProximityController.sensorRange)
+    self:startMovingBackBeforePathfinding(self.pathfinderController, context,
+            self.pathfindingRetriesAfterBlockedByObject)
 end
 
 function AIDriveStrategyUnloadCombine:requestToMoveOutOfWay(vehicle)
