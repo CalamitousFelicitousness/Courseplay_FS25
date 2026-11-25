@@ -33,7 +33,11 @@ AIDriveStrategyDriveToFieldWorkStart.myStates = {
     PREPARE_TO_DRIVE = {},
     DRIVING_TO_WORK_START = {},
     WORK_START_REACHED = {},
+    MOVING_BACK_BEFORE_PATHFINDING = {},
 }
+
+-- after this many back-up-and-replan attempts on the way, stop the job
+AIDriveStrategyDriveToFieldWorkStart.maxBlockedRecoveries = 2
 
 -- minimum distance to the target when this strategy is even used
 AIDriveStrategyDriveToFieldWorkStart.minDistanceToDrive = 20
@@ -47,6 +51,13 @@ function AIDriveStrategyDriveToFieldWorkStart:init(task, job)
     self.debugChannel = CpDebug.DBG_FIELDWORK
     self.prepareTimeout = 0
     self.emergencyBrake = CpTemporaryObject(true)
+    self.blockedRecoveries = 0
+end
+
+function AIDriveStrategyDriveToFieldWorkStart:setAllStaticParameters()
+    AIDriveStrategyCourse.setAllStaticParameters(self)
+    self.proximityController:registerBlockingVehicleListener(self, AIDriveStrategyDriveToFieldWorkStart.onBlockingVehicle)
+    self.proximityController:registerBlockingObjectListener(self, AIDriveStrategyDriveToFieldWorkStart.onBlockingObject)
 end
 
 function AIDriveStrategyDriveToFieldWorkStart:delete()
@@ -133,6 +144,8 @@ function AIDriveStrategyDriveToFieldWorkStart:getDriveData(dt, vX, vY, vZ)
         end
     elseif self.state == self.states.DRIVING_TO_WORK_START then
         self:setMaxSpeed(self.settings.fieldSpeed:getValue())
+    elseif self.state == self.states.MOVING_BACK_BEFORE_PATHFINDING then
+        self:setMaxSpeed(self.settings.reverseSpeed:getValue())
     elseif self.state == self.states.WORK_START_REACHED then
         if self.emergencyBrake:get() then
             self:debugSparse('Work start reached but field work did not start...')
@@ -152,7 +165,9 @@ end
 ---------------------------------------------------------------------------------------------------------------------------
 ---@param course Course
 ---@param ix number
-function AIDriveStrategyDriveToFieldWorkStart:startCourseWithPathfinding(course, ix)
+---@param clearance number|nil extra distance to keep around the vehicle near the start, see PathfinderContext
+function AIDriveStrategyDriveToFieldWorkStart:startCourseWithPathfinding(course, ix, clearance)
+    self.state = self.states.INITIAL
     self.course = course
     self.ppc:setCourse(self.course)
     self.ppc:initialize(ix)
@@ -168,6 +183,10 @@ function AIDriveStrategyDriveToFieldWorkStart:startCourseWithPathfinding(course,
     local fieldNum = CpFieldUtil.getFieldIdAtWorldPosition(x, z)
     context:areaToIgnoreFruit(fruitAtTarget and PathfinderUtil.Area(x, z, 2 * self.workWidth) or nil)
     context:useFieldNum(fieldNum):allowReverse(self:getAllowReversePathfinding())
+    if clearance then
+        -- only near the start, where the obstacle that stopped us is
+        context:clearance(clearance):clearanceRange(1.5 * self.turningRadius + ProximityController.sensorRange)
+    end
 
     local _, steeringLength = AIUtil.getSteeringParameters(self.vehicle)
     -- always drive a behind the target waypoint so there's room to straighten out towed implements
@@ -185,7 +204,7 @@ end
 ---@param course Course|nil
 ---@param goalNodeInvalid boolean|nil
 function AIDriveStrategyDriveToFieldWorkStart:onPathfindingFinished(controller, success, course, goalNodeInvalid)
-    if success then 
+    if success then
         course:adjustForTowedImplements(2)
     else
         self:debug('Pathfinding to start fieldwork failed, using alignment course instead')
@@ -212,6 +231,9 @@ end
 -----------------------------------------------------------------------------------------------------------------------
 ---@param course Course
 function AIDriveStrategyDriveToFieldWorkStart:onWaypointChange(ix, course)
+    if self.state == self.states.MOVING_BACK_BEFORE_PATHFINDING then
+        return
+    end
     if course:isCloseToLastWaypoint(15) then
         self.state = self.states.WORK_START_REACHED
         -- just in case no one takes the wheel in a few seconds
@@ -224,7 +246,58 @@ function AIDriveStrategyDriveToFieldWorkStart:onWaypointChange(ix, course)
     end
 end
 
---- For whatever reason giants decided to turn on sprayers in: 
+function AIDriveStrategyDriveToFieldWorkStart:onWaypointPassed(ix, course)
+    if self.state == self.states.MOVING_BACK_BEFORE_PATHFINDING and course:isLastWaypointIx(ix) then
+        self:replanAfterBlocked()
+    end
+end
+
+function AIDriveStrategyDriveToFieldWorkStart:onBlockingVehicle(vehicle, isBack)
+    self:debug('%s has been blocking us for a while', CpUtil.getName(vehicle))
+    self:onBlocked(isBack)
+end
+
+function AIDriveStrategyDriveToFieldWorkStart:onBlockingObject(isBack)
+    self:debug('An object has been blocking us for a while')
+    self:onBlocked(isBack)
+end
+
+--- The path came closer to something than the proximity sensor allows. Back up and plan again, this time
+--- staying out of the sensor's stop range near the start.
+function AIDriveStrategyDriveToFieldWorkStart:onBlocked(isBack)
+    if self.state == self.states.MOVING_BACK_BEFORE_PATHFINDING then
+        if isBack then
+            self:debug('Blocked while backing up, plan from here')
+            self:replanAfterBlocked()
+        end
+        return
+    elseif self.state ~= self.states.DRIVING_TO_WORK_START then
+        return
+    end
+    if self.blockedRecoveries >= self.maxBlockedRecoveries then
+        self:debug('Still blocked after %d recoveries, giving up', self.blockedRecoveries)
+        self.vehicle:stopCurrentAIJob(AIMessageCpErrorNoPathFound.new())
+        return
+    end
+    self.blockedRecoveries = self.blockedRecoveries + 1
+    if isBack then
+        self:debug('Blocked while reversing, plan from here (recovery %d of %d)',
+                self.blockedRecoveries, self.maxBlockedRecoveries)
+        self:replanAfterBlocked()
+    else
+        self:debug('Blocked, backing up before planning again (recovery %d of %d)',
+                self.blockedRecoveries, self.maxBlockedRecoveries)
+        self.state = self.states.MOVING_BACK_BEFORE_PATHFINDING
+        self:startCourse(Course.createStraightReverseCourse(self.vehicle, 1.5 * self.turningRadius), 1)
+    end
+end
+
+function AIDriveStrategyDriveToFieldWorkStart:replanAfterBlocked()
+    local course, ix = self:getRememberedCourseAndIx()
+    self:startCourseWithPathfinding(course, ix, ProximityController.stopThresholdNormal + 0.25)
+end
+
+--- For whatever reason giants decided to turn on sprayers in:
 --- Sprayer:onStartWorkAreaProcessing(dt), when AI is active.
 --- Even if the AI is not a fieldworker and so on ...
 function AIDriveStrategyDriveToFieldWorkStart.giantsTurnOnFix(vehicle, superFunc, ...)
