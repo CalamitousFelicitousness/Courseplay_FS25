@@ -817,11 +817,10 @@ function RecoveryTurn:init(vehicle, driveStrategy, ppc, proximityController, tur
         self:debug('reversing before pathfinding, retry count %d, reverse distance %.1f',
                 self.retryCount, reverseDistance)
         self.state = self.states.REVERSING_AFTER_BLOCKED
-        -- start where the node the PPC follows in reverse is, so it really backs up reverseDistance. Starting at
-        -- the root node (3 m ahead of it on a combine) used up most of a short reverse course before moving.
-        local dzReverser = AIUtil.getDirectionNodeToReverserNodeOffset(self.vehicle)
-        self.turnCourse = Course.createFromNode(self.vehicle, AIUtil.getDirectionNode(self.vehicle), 0,
-                dzReverser, dzReverser - reverseDistance, -5, true)
+        -- start at the node the PPC follows in reverse and along its heading: a towed implement is at an angle
+        -- to the tractor in a turn, and a course along the tractor's axis jackknifes it
+        local reverserNode = AIUtil.getReverserNode(self.vehicle) or AIUtil.getDirectionNode(self.vehicle)
+        self.turnCourse = Course.createFromNode(self.vehicle, reverserNode, 0, 0, -reverseDistance, -5, true)
         self.ppc:setCourse(self.turnCourse)
         self.ppc:initialize(1)
     end
