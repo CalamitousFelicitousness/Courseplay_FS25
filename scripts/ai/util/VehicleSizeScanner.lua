@@ -33,6 +33,7 @@ end
 ---@return number left distance of the leftmost point from the reference node
 ---@return number right distance of the rightmost point from the reference node
 function VehicleSizeScanner:scan(vehicle, referenceNode)
+    self.allSidesFound = true
     self.left = self:_measureDimension(vehicle, referenceNode, 50, 0.1, 'x')
     self.right = self:_measureDimension(vehicle, referenceNode, -50, -0.1, 'x')
     self.front = self:_measureDimension(vehicle, referenceNode, 50, 0.1, 'z')
@@ -40,6 +41,12 @@ function VehicleSizeScanner:scan(vehicle, referenceNode)
     self.logger:debug(vehicle, 'Front: %.1f Rear: %.1f Left: %.1f Right: %.1f ',
             self.front, self.rear, self.left, self.right)
     return self.front, self.rear, self.left, self.right
+end
+
+--- false if the last scan did not hit the vehicle from every side (no collision geometry), the
+--- dimensions of the missing sides are then defaults, not measurements
+function VehicleSizeScanner:isComplete()
+    return self.allSidesFound
 end
 
 function VehicleSizeScanner:getLength()
@@ -89,6 +96,9 @@ function VehicleSizeScanner:_measureDimension(vehicle, referenceNode, startDista
             dimension = ix
             break
         end
+    end
+    if not self.scannedVehicleFound then
+        self.allSidesFound = false
     end
     return dimension
 end

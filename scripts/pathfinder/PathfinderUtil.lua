@@ -146,6 +146,54 @@ function PathfinderUtil.VehicleData:getRectangleForImplement(implement, referenc
         if aiBackMarker then
             _, _, rectangle.dRear = localToLocal(aiBackMarker, referenceNode, 0, 0, 0)
         end
+        -- markers mark the worked area, which for spreaders or folded booms is far wider than the machine
+        local physical = self:getPhysicalRectangle(implement.object, referenceNode, buffer)
+        if physical and self:extendsBeyond(rectangle, physical, 1) then
+            PathfinderUtil.logger:debug(self.vehicle, '%s: AI markers (%.1f/%.1f/%.1f/%.1f) exceed its body, using %.1f/%.1f/%.1f/%.1f',
+                    CpUtil.getName(implement.object), rectangle.dFront, rectangle.dRear, rectangle.dLeft, rectangle.dRight,
+                    physical.dFront, physical.dRear, physical.dLeft, physical.dRight)
+            rectangle = physical
+        end
+    end
+    return rectangle
+end
+
+---@return boolean true if any side of a is more than margin outside of b
+function PathfinderUtil.VehicleData:extendsBeyond(a, b, margin)
+    return a.dFront > b.dFront + margin or a.dRear < b.dRear - margin or
+            a.dLeft > b.dLeft + margin or a.dRight < b.dRight - margin
+end
+
+--- Rectangle of the object's collision geometry, relative to referenceNode. Scanned once per object and fold
+--- end position (the scan is a few thousand overlap boxes), not cached while folding.
+---@return table|nil nil if the object has no collision geometry on every side
+function PathfinderUtil.VehicleData:getPhysicalRectangle(object, referenceNode, buffer)
+    local foldKey = 'fixed'
+    local foldable = object.spec_foldable
+    if foldable and foldable.foldAnimTime then
+        foldKey = foldable.foldAnimTime <= 0 and 'start' or foldable.foldAnimTime >= 1 and 'end' or nil
+    end
+    local size = foldKey and object.cpPhysicalSize and object.cpPhysicalSize[foldKey]
+    if not size then
+        local dFront, dRear, dLeft, dRight = self.vehicleSizeScanner:scan(object)
+        size = { valid = self.vehicleSizeScanner:isComplete(), dFront = dFront, dRear = dRear, dLeft = dLeft, dRight = dRight }
+        if foldKey then
+            object.cpPhysicalSize = object.cpPhysicalSize or {}
+            object.cpPhysicalSize[foldKey] = size
+        end
+    end
+    if not size.valid then
+        return nil
+    end
+    -- corners are in the object's frame, convert them to the reference node's
+    local rectangle = { dFront = -math.huge, dRear = math.huge, dLeft = -math.huge, dRight = math.huge }
+    for _, corner in ipairs({ { size.dLeft, size.dFront }, { size.dRight, size.dFront },
+                              { size.dLeft, size.dRear }, { size.dRight, size.dRear } }) do
+        local x, _, z = localToLocal(object.rootNode, referenceNode, corner[1], 0, corner[2])
+        rectangle.dFront = math.max(rectangle.dFront, z + (buffer or 0))
+        rectangle.dRear = math.min(rectangle.dRear, z - (buffer or 0))
+        rectangle.dLeft = math.max(rectangle.dLeft, x)
+        rectangle.dRight = math.min(rectangle.dRight, x)
     end
     return rectangle
 end
