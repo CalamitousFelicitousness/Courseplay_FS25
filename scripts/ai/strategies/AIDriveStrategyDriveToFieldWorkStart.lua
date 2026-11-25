@@ -38,6 +38,8 @@ AIDriveStrategyDriveToFieldWorkStart.myStates = {
 
 -- after this many back-up-and-replan attempts on the way, stop the job
 AIDriveStrategyDriveToFieldWorkStart.maxBlockedRecoveries = 2
+-- how far along the row the work start may move when there is no room for the vehicle at the start waypoint
+AIDriveStrategyDriveToFieldWorkStart.maxStartShift = 30
 
 -- minimum distance to the target when this strategy is even used
 AIDriveStrategyDriveToFieldWorkStart.minDistanceToDrive = 20
@@ -169,9 +171,6 @@ end
 function AIDriveStrategyDriveToFieldWorkStart:startCourseWithPathfinding(course, ix, clearance)
     self.state = self.states.INITIAL
     self.course = course
-    self.ppc:setCourse(self.course)
-    self.ppc:initialize(ix)
-    self:rememberCourse(course, ix)
     self:setFrontAndBackMarkers()
 
     local context = PathfinderContext(self.vehicle)
@@ -191,8 +190,12 @@ function AIDriveStrategyDriveToFieldWorkStart:startCourseWithPathfinding(course,
     local _, steeringLength = AIUtil.getSteeringParameters(self.vehicle)
     -- always drive a behind the target waypoint so there's room to straighten out towed implements
     -- a bit before start working
-    self.zOffset = math.min(-self.frontMarkerDistance, -steeringLength)
-    self:debug('Pathfinding to waypoint %d, with zOffset %.1f = min(%.1f, %.1f)', ix, self.zOffset,
+    local zOffset = math.min(-self.frontMarkerDistance, -steeringLength)
+    ix, self.zOffset = self:findValidGoal(context, course, ix, zOffset)
+    self.ppc:setCourse(self.course)
+    self.ppc:initialize(ix)
+    self:rememberCourse(course, ix)
+    self:debug('Pathfinding to waypoint %d, with zOffset %.1f (min(%.1f, %.1f))', ix, self.zOffset,
             -self.frontMarkerDistance, -steeringLength)
 
     self.pathfinderController:findPathToWaypoint(context, course, ix, 0, self.zOffset, 1)
@@ -226,6 +229,33 @@ function AIDriveStrategyDriveToFieldWorkStart:onPathfindingFailed(controller, la
     controller:retry(lastContext)
 end
 
+--- A start waypoint at the field edge can have a pole, hedge or fence where the vehicle and its implements
+--- would stand. Walk along the row to the first waypoint with room, first with the offset that leaves room to
+--- straighten a towed implement, then without it.
+---@return number waypoint index to start work at
+---@return number zOffset of the goal from that waypoint
+function AIDriveStrategyDriveToFieldWorkStart:findValidGoal(context, course, ix, zOffset)
+    local constraints = PathfinderConstraints(context)
+    local offsets = zOffset < 0 and { zOffset, 0 } or { zOffset }
+    for i = ix, course:getNumberOfWaypoints() do
+        if i > ix and (course:isTurnStartAtIx(i) or
+                course:getDistanceBetweenWaypoints(ix, i) > self.maxStartShift) then
+            break
+        end
+        for _, z in ipairs(offsets) do
+            if PathfinderUtil.isGoalValid(PathfinderUtil.getWaypointAsState3D(course:getWaypoint(i), 0, z), constraints) then
+                if i ~= ix or z ~= zOffset then
+                    self:debug('No room at waypoint %d (zOffset %.1f), starting at waypoint %d (zOffset %.1f), %.1f m further',
+                            ix, zOffset, i, z, course:getDistanceBetweenWaypoints(ix, i))
+                end
+                return i, z
+            end
+        end
+    end
+    self:debug('No room for the vehicle within %d m of waypoint %d, pathfinding to it anyway', self.maxStartShift, ix)
+    return ix, zOffset
+end
+
 -----------------------------------------------------------------------------------------------------------------------
 --- Event listeners
 -----------------------------------------------------------------------------------------------------------------------
@@ -240,7 +270,8 @@ function AIDriveStrategyDriveToFieldWorkStart:onWaypointChange(ix, course)
         self.emergencyBrake:set(false, 2000)
         self:debug('Almost at the work start waypoint, preparing for work')
         -- let the field work strategy know where to continue
-        self.job:setStartFieldWorkCourse(course, ix)
+        local _, fieldWorkStartIx = self:getRememberedCourseAndIx()
+        self.job:setStartFieldWorkCourse(course, ix, fieldWorkStartIx)
         self.job:setStartPosition(self.startPosition)
         self:setCurrentTaskFinished()
     end

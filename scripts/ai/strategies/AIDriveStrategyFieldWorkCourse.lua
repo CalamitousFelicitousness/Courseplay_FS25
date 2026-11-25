@@ -59,6 +59,13 @@ end
 --- Start a fieldwork course. We expect that something else dropped us off close enough to startIx so
 --- the most we need is an alignment course to lower the implements
 function AIDriveStrategyFieldWorkCourse:start(course, startIx, jobParameters)
+    ---@type CpAIJobFieldWork
+    local job = self.vehicle:getJob()
+    local alignmentCourse, alignmentCourseStartIx, fieldWorkStartIx = job:getStartFieldWorkCourse()
+    if alignmentCourse and fieldWorkStartIx then
+        -- the drive to fieldwork start found no room for the vehicle at startIx and went for this one
+        startIx = fieldWorkStartIx
+    end
     self:showAllInfo('Starting field work at waypoint %d', startIx)
     self:updateFieldworkOffset(course)
     self.fieldWorkCourse = course
@@ -69,10 +76,6 @@ function AIDriveStrategyFieldWorkCourse:start(course, startIx, jobParameters)
     self.vehiclesInConvoy = {}
 
     local distance = course:getDistanceBetweenVehicleAndWaypoint(self.vehicle, startIx)
-
-    ---@type CpAIJobFieldWork
-    local job = self.vehicle:getJob()
-    local alignmentCourse, alignmentCourseStartIx = job:getStartFieldWorkCourse()
 
     if alignmentCourse then
         -- there is an alignment course already created by the AIDriveStrategyDriveToFieldWorkStart,

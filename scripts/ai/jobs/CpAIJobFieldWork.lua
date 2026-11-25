@@ -177,13 +177,16 @@ end
 
 -- To pass an alignment course from the drive to fieldwork start to the fieldwork, so the
 -- fieldwork strategy can continue the alignment course set up by the drive to fieldwork start strategy.
-function CpAIJobFieldWork:setStartFieldWorkCourse(course, ix)
+---@param fieldWorkStartIx number|nil fieldwork course waypoint the alignment course leads to, when it is not
+--- the one the start position setting picks (no room for the vehicle there)
+function CpAIJobFieldWork:setStartFieldWorkCourse(course, ix, fieldWorkStartIx)
     self.startFieldWorkCourse = course
     self.startFieldWorkCourseIx = ix
+    self.fieldWorkStartIx = fieldWorkStartIx
 end
 
 function CpAIJobFieldWork:getStartFieldWorkCourse()
-    return self.startFieldWorkCourse, self.startFieldWorkCourseIx
+    return self.startFieldWorkCourse, self.startFieldWorkCourseIx, self.fieldWorkStartIx
 end
 
 --- Is course generation allowed ?

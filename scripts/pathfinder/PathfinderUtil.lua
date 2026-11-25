@@ -615,6 +615,16 @@ function PathfinderUtil.getWaypointAsState3D(waypoint, xOffset, zOffset)
     return result
 end
 
+--- Is there room at goal for the vehicle and its implements, with a towed implement straight behind?
+---@param goal State3D
+---@param constraints PathfinderConstraints
+function PathfinderUtil.isGoalValid(goal, constraints)
+    goal.tTrailer = goal.t
+    -- no start clearance at the goal
+    goal.d = math.huge
+    return constraints:isValidNode(goal, false, true)
+end
+
 ------------------------------------------------------------------------------------------------------------------------
 --- Interface function to start the pathfinder in the game, using a State3D pose as the goal
 ------------------------------------------------------------------------------------------------------------------------
