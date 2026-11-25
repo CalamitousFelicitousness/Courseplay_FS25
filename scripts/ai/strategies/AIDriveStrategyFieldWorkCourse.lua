@@ -691,6 +691,30 @@ function AIDriveStrategyFieldWorkCourse:setAllStaticParameters()
     self:setFrontAndBackMarkers()
     self.loweringDurationMs = AIUtil.findLoweringDurationMs(self.vehicle)
     self.fieldWorkerProximityController = FieldWorkerProximityController(self.vehicle, self.workWidth)
+    self.proximityController:registerBlockingVehicleListener(self, AIDriveStrategyFieldWorkCourse.onBlockingVehicle)
+end
+
+--- This is called by the proximity controller if we have been blocked by another vehicle for a while
+function AIDriveStrategyFieldWorkCourse:onBlockingVehicle(vehicle, isBack)
+    self:debug('Proximity sensor: blocking vehicle %s %s us', CpUtil.getName(vehicle), isBack and 'behind' or 'in front of')
+    self:onBlockedInTurnByVehicle(vehicle, isBack)
+end
+
+--- A vehicle not driven by a CP unloader (AutoDrive, parked, player, detached implement) won't move for us.
+---@param isBack boolean the vehicle is behind us
+function AIDriveStrategyFieldWorkCourse:onBlockedInTurnByVehicle(vehicle, isBack)
+    if not self:isTurning() or not self.aiTurn then
+        return
+    end
+    if isBack and self.aiTurn:isEndingTurn() then
+        -- only backing up to place the implement at the row start, start the row from here instead
+        self:debug('%s does not yield, starting the row from here', CpUtil.getName(vehicle))
+        self.aiTurn:resumeFieldworkAfterTurn(self.aiTurn.turnContext.turnEndWpIx)
+    else
+        -- back up and find another way through the turn, or wait until it clears
+        self:debug('%s does not yield, recovering the turn', CpUtil.getName(vehicle))
+        self.aiTurn:onBlockedByVehicle(isBack)
+    end
 end
 
 -----------------------------------------------------------------------------------------------------------------------

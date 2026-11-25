@@ -2224,23 +2224,6 @@ function AIDriveStrategyCombineCourse:onBlockingVehicle(vehicle, isBack)
     end
 end
 
---- A vehicle not driven by a CP unloader (AutoDrive, parked, player) won't move for us.
----@param isBack boolean the vehicle is behind us
-function AIDriveStrategyCombineCourse:onBlockedInTurnByVehicle(vehicle, isBack)
-    if not self:isTurning() or not self.aiTurn then
-        return
-    end
-    if isBack and self.aiTurn:isEndingTurn() then
-        -- only backing up to place the header at the row start, start the row from here instead
-        self:debug('%s does not yield, starting the row from here', CpUtil.getName(vehicle))
-        self.aiTurn:resumeFieldworkAfterTurn(self.aiTurn.turnContext.turnEndWpIx)
-    else
-        -- back up and find another way through the turn, or wait until it clears
-        self:debug('%s does not yield, recovering the turn', CpUtil.getName(vehicle))
-        self.aiTurn:onBlockedByVehicle(isBack)
-    end
-end
-
 -- An unloader may request the harvester to ignore its proximity because the unloader will take care
 -- of staying away.
 function AIDriveStrategyCombineCourse:requestToIgnoreProximity(vehicle)
